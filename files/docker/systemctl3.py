@@ -1721,8 +1721,8 @@ class Systemctl:
                 conf = self.get_unit_conf(unit)
                 result[unit] = "loaded"
                 description[unit] = self.get_description_from(conf)
-                active[unit] = self.get_active_from(conf)
-                substate[unit] = self.get_substate_from(conf) or "unknown"
+                active[unit] = self.get_active_from(conf, check_retry=True)
+                substate[unit] = self.get_substate_from(conf, check_retry=True) or "unknown"
             except Exception as e:
                 logg.warning("list-units: %s", e)
             if self._unit_state:
@@ -4199,6 +4199,8 @@ class Systemctl:
                 logg.error("kill PID %s => %s", pid, str(e))
                 return False
         return not pid_exists(pid) or pid_zombie(pid)
+    def _has_restart_policy(self, conf):
+        return conf.get(Service, "Restart", "no").lower() in ["always", "on-failure"]
     def is_active_modules(self, *modules):
         """ [UNIT].. -- check if these units are in active state
         implements True if all is-active = True """
@@ -4263,9 +4265,9 @@ class Systemctl:
             return "unknown"
         else:
             return self.get_active_from(conf)
-    def get_active_from(self, conf):
+    def get_active_from(self, conf, check_retry=False):
         if conf.name().endswith(".service"):
-            return self.get_active_service_from(conf)
+            return self.get_active_service_from(conf, check_retry=check_retry)
         elif conf.name().endswith(".socket"):
             service_unit = self.get_socket_service_from(conf)
             service_conf = self.load_unit_conf(service_unit)
@@ -4275,7 +4277,7 @@ class Systemctl:
         else:
             logg.debug("is-active not implemented for unit type: %s", conf.name())
             return "unknown" # TODO: "inactive" ?
-    def get_active_service_from(self, conf):
+    def get_active_service_from(self, conf, check_retry=False):
         """ returns 'active' 'inactive' 'failed' 'unknown' """
         # used in try-restart/other commands to check if needed.
         if not conf: return "unknown"
@@ -4295,6 +4297,8 @@ class Systemctl:
             logg.debug("pid_file '%s' => PID %s", pid_file or status_file, strE(pid))
         if pid:
             if not pid_exists(pid) or pid_zombie(pid):
+                if check_retry and self._has_restart_policy(conf):
+                    return "activating"
                 return "failed"
             return "active"
         else:
@@ -4327,7 +4331,7 @@ class Systemctl:
         target_list += [DefaultUnit] # upper end
         target_list += [SysInitTarget] # lower end
         return target_list
-    def get_substate_from(self, conf):
+    def get_substate_from(self, conf, check_retry=False):
         """ returns 'running' 'exited' 'dead' 'failed' 'plugged' 'mounted' """
         if not conf: return None
         pid_file = self.pid_file_from(conf)
@@ -4347,6 +4351,8 @@ class Systemctl:
             logg.debug("pid_file '%s' => PID %s", pid_file or status_file, strE(pid))
         if pid:
             if not pid_exists(pid) or pid_zombie(pid):
+                if check_retry and self._has_restart_policy(conf):
+                    return "auto-restart"
                 return "failed"
             return "running"
         else:
@@ -4472,8 +4478,8 @@ class Systemctl:
         else:
             result += "\n    Loaded: failed"
             return 3, result
-        active = self.get_active_from(conf)
-        substate = self.get_substate_from(conf)
+        active = self.get_active_from(conf, check_retry=True)
+        substate = self.get_substate_from(conf, check_retry=True)
         result += "\n    Active: {} ({})".format(active, substate)
         if active == "active":
             return 0, result
